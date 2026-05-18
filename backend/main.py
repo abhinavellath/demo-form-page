@@ -37,6 +37,13 @@ async def root():
 @app.post("/lead")
 async def receive_lead(data: Lead):
 
+    print("===== NEW LEAD RECEIVED =====")
+    print("Name:", data.name)
+    print("Phone:", data.phone)
+    print("Role:", data.role)
+    print("Experience:", data.experience)
+    print("=============================")
+
     payload = {
         "assistantId": VAPI_ASSISTANT_ID,
         "phoneNumberId": VAPI_PHONE_NUMBER_ID,

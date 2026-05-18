@@ -21,7 +21,7 @@ export default function Home() {
 
     try {
       const response = await fetch(
-        'https://demo-form-page.onrender.com',
+        'https://demo-form-page.onrender.com/lead',
         {
           method: 'POST',
           headers: {

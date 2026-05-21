@@ -82,16 +82,20 @@ export default function Home() {
             required
           />
 
-          <input
-            type="text"
-            placeholder="Role Applied"
-            className="w-full border p-3 rounded-lg"
+          <select
+            className="w-full border p-3 rounded-lg bg-white"
             value={form.role}
             onChange={(e) =>
               setForm({ ...form, role: e.target.value })
             }
             required
-          />
+          >
+            <option value="" disabled>
+              Role applied (required for screening bank)
+            </option>
+            <option value="DevOps Engineer">DevOps Engineer</option>
+            <option value="AI Engineer">AI Engineer</option>
+          </select>
 
           <input
             type="text"

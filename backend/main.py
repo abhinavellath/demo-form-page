@@ -1,9 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import json
 import requests
 import os
 from dotenv import load_dotenv
+
+from rag import retrieve_kb_context
 
 load_dotenv()
 
@@ -44,6 +47,13 @@ async def receive_lead(data: Lead):
     print("Experience:", data.experience)
     print("=============================")
 
+    kb_context, rag_meta = retrieve_kb_context(
+        role=data.role,
+        experience=data.experience,
+        name=data.name,
+    )
+    print("RAG:", json.dumps(rag_meta, default=str))
+
     payload = {
         "assistantId": VAPI_ASSISTANT_ID,
         "phoneNumberId": VAPI_PHONE_NUMBER_ID,
@@ -55,7 +65,8 @@ async def receive_lead(data: Lead):
             "variableValues": {
                 "candidate_name": data.name,
                 "role": data.role,
-                "experience": data.experience
+                "experience": data.experience,
+                "kb_context": kb_context,
             }
         }
     }

@@ -82,3 +82,11 @@ Optional: `AWS_SESSION_TOKEN` if using temporary credentials (boto3 reads it aut
 | Wrong embedding length | Must stay **1536** for `amazon.titan-embed-text-v1` and current SQL. |
 | `no_rows_for_role` | Run `ingest_kb.py`; verify rows in Supabase **kb_chunks**. |
 | Mixed old vectors | After any embedding provider change, **re-run ingest** for all roles. |
+
+## Leads table (form submissions)
+
+1. In Supabase **SQL Editor**, run `supabase/sql/002_leads.sql` (after `001_kb_chunks.sql`).
+2. Uses the same **`DATABASE_URL`** as RAG — no extra env vars.
+3. Each **`POST /lead`** inserts one row into **`public.leads`**: `name`, `phone`, `role`, `experience`, `rag_meta` (JSON), `vapi_http_status`, and when the Vapi body is JSON, `vapi_call_id` + `vapi_call_status`. If the insert fails, the handler still returns the normal response and logs **`LEAD_PERSIST_FAILED`**.
+
+**View:** Supabase **Table Editor → leads**, or SQL: `select * from public.leads order by created_at desc limit 50;`

@@ -7,6 +7,7 @@ import os
 from dotenv import load_dotenv
 
 from rag import retrieve_kb_context
+from leads_db import persist_lead
 
 load_dotenv()
 
@@ -83,6 +84,16 @@ async def receive_lead(data: Lead):
     )
 
     print(response.text)
+
+    persist_lead(
+        name=data.name,
+        phone=data.phone,
+        role=data.role,
+        experience=data.experience,
+        rag_meta=rag_meta,
+        vapi_http_status=response.status_code,
+        vapi_response_text=response.text,
+    )
 
     return {
         "message": f"AI recruiter is calling {data.name}"

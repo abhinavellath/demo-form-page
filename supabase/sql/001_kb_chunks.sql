@@ -17,4 +17,4 @@ create index if not exists kb_chunks_role_idx on public.kb_chunks (role);
 
 -- Optional later: CREATE INDEX ON kb_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 
-comment on table public.kb_chunks is 'Role-tagged screening chunks for call-start RAG (text-embedding-3-small, 1536 dims).';
+comment on table public.kb_chunks is 'Role-tagged screening chunks. Embeddings: 1536-dim (e.g. Amazon Titan amazon.titan-embed-text-v1 or OpenAI text-embedding-3-small — re-ingest if provider changes).';

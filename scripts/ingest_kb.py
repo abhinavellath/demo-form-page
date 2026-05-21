@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-Load kb/*.md (fenced ```json blocks), embed with OpenAI text-embedding-3-small,
-upsert into Supabase Postgres + pgvector table public.kb_chunks.
+Load kb/*.md (fenced ```json blocks), embed with Amazon Bedrock
+amazon.titan-embed-text-v1 (1536-dim), upsert into Supabase + pgvector.
 
 Run manually when KB markdown changes (no CI).
 
 Usage (from repo root):
-  cd demo-page
   pip install -r backend/requirements.txt
-  set OPENAI_API_KEY=...
-  set DATABASE_URL=postgresql://...   (Supabase: use direct connection string, SSL)
+  set AWS_ACCESS_KEY_ID=...
+  set AWS_SECRET_ACCESS_KEY=...
+  set AWS_REGION=us-east-1
+  set DATABASE_URL=postgresql://...
   python scripts/ingest_kb.py
 
 What it does:
-  1. Parses all ```json ... ``` blocks from kb/devops_engineer.md and kb/ai_engineer.md
+  1. Parses all ```json ... ``` blocks from kb/*.md (except README.md)
   2. Validates role field matches DevOps Engineer | AI Engineer
   3. Deletes existing kb_chunks rows for each role present in the files (clean reload)
-  4. Batch-embeds all chunk embedding_text values in one OpenAI call
+  4. Calls Bedrock Titan v1 once per chunk (invoke_model)
   5. Inserts rows with 1536-dim vectors
 """
 from __future__ import annotations
@@ -29,6 +30,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 KB_DIR = ROOT / "kb"
+BACKEND_DIR = ROOT / "backend"
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
 
 # Load .env from backend/ if present
 try:
@@ -40,7 +44,6 @@ except ImportError:
     pass
 
 ALLOWED_ROLES = {"DevOps Engineer", "AI Engineer"}
-EMBEDDING_MODEL = "text-embedding-3-small"
 JSON_BLOCK = re.compile(r"```json\s*([\s\S]*?)\s*```", re.IGNORECASE)
 
 
@@ -89,10 +92,15 @@ def parse_md(path: Path) -> list[dict]:
 
 
 def main() -> None:
-    api_key = os.getenv("OPENAI_API_KEY")
+    ak = os.getenv("AWS_ACCESS_KEY_ID")
+    sk = os.getenv("AWS_SECRET_ACCESS_KEY")
     db_url = os.getenv("DATABASE_URL")
-    if not api_key or not db_url:
-        print("Set OPENAI_API_KEY and DATABASE_URL in the environment (or backend/.env).", file=sys.stderr)
+    if not ak or not sk or not db_url:
+        print(
+            "Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and DATABASE_URL "
+            "(and AWS_REGION, e.g. us-east-1) in the environment or backend/.env.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     md_files = sorted(KB_DIR.glob("*.md"))
@@ -115,11 +123,9 @@ def main() -> None:
     roles_in_batch = {c["role"] for c in all_chunks}
     texts = [chunk_to_embedding_text(c) for c in all_chunks]
 
-    from openai import OpenAI
+    from embeddings import embed_titan_v1_batch
 
-    client = OpenAI(api_key=api_key)
-    emb = client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
-    vectors = [d.embedding for d in emb.data]
+    vectors = embed_titan_v1_batch(texts)
     if len(vectors) != len(all_chunks):
         print("Embedding count mismatch", file=sys.stderr)
         sys.exit(1)

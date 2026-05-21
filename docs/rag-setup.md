@@ -1,75 +1,84 @@
-# RAG setup (Supabase + OpenAI embeddings)
+# RAG setup (Supabase + Amazon Bedrock Titan embeddings)
+
+Embeddings use **Amazon Bedrock** `amazon.titan-embed-text-v1` (**1536** dimensions), matching `vector(1536)` in `supabase/sql/001_kb_chunks.sql`. No column change when switching from OpenAI.
 
 ## Phase 1 — Supabase
 
 1. Create a project at [supabase.com](https://supabase.com).
-2. **SQL Editor** → paste and run `supabase/sql/001_kb_chunks.sql`.
-3. Copy the **database password** and build `DATABASE_URL`:
-   - In Supabase: **Project Settings → Database**.
-   - Use the **URI** mode connection string (direct Postgres, port **5432**), not the pooler, for fewer surprises with `pgvector` from Render/scripts.
-   - Example shape:  
-     `postgresql://postgres:<PASSWORD>@db.<PROJECT_REF>.supabase.co:5432/postgres`
-   - Append `?sslmode=require` if your client does not default to SSL (psycopg2 uses `sslmode=require` in code).
+2. **SQL Editor** → run `supabase/sql/001_kb_chunks.sql`.
+3. Build **`DATABASE_URL`** (direct Postgres, port **5432** recommended). See Supabase **Project Settings → Database**.
 
-## Phase 2 — Ingest (local, manual)
+## Phase 2 — AWS Bedrock
 
-**When to run:** after any edit to `kb/*.md`, or after first creating the table.
+1. **Region:** pick a region where **Titan Embeddings** is enabled (e.g. `us-east-1`). Set **`AWS_REGION`** to that value on Render and locally.
+2. **Model access:** AWS console → **Bedrock** → **Model access** (or equivalent) → enable **`amazon.titan-embed-text-v1`**.
+3. **IAM user** (for Render) with **`bedrock:InvokeModel`** on the foundation model ARN for Titan Embeddings v1 (scope can be tightened after it works).
+4. Keys: **`AWS_ACCESS_KEY_ID`** + **`AWS_SECRET_ACCESS_KEY`** on Render (or use Render’s supported AWS integration if you move to roles later).
 
-**What it does:** parses every ` ```json ` … ` ``` ` block in `kb/*.md` (except `README.md`), validates `role`, batch-embeds with `text-embedding-3-small`, **deletes** existing `kb_chunks` rows for each role found, then **inserts** fresh rows.
+## Phase 3 — Ingest (local, manual)
 
-From the **repo root** (`demo-page/`):
+**When to run:** after any edit to `kb/*.md`, or after switching embedding provider (always **re-ingest** so vectors are all Titan).
+
+**What it does:** parses ` ```json ` blocks → deletes rows per affected role → **one Bedrock `invoke_model` per chunk`** → inserts into `kb_chunks`.
+
+From **repo root**:
 
 ```bash
 pip install -r backend/requirements.txt
-set OPENAI_API_KEY=sk-...
-set DATABASE_URL=postgresql://...
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_REGION=us-east-1
+export DATABASE_URL=postgresql://...
 python scripts/ingest_kb.py
 ```
 
-On macOS/Linux use `export` instead of `set`.
+Windows: `set VAR=value` instead of `export`.
 
-You should see per-file chunk counts and `Inserted 10 rows` (5 + 5).
+Expect **Inserted 10 rows** (5 + 5) after first full ingest.
 
-## Phase 3–4 — Render
+## Phase 4 — Render
 
-Add environment variables (see list below). Redeploy so `pip install` picks up `openai`, `psycopg2-binary`, `pgvector`.
+Redeploy after `requirements.txt` change (`boto3` replaces `openai`).
 
-Each `POST /lead` will:
+Each `POST /lead`:
 
-1. Log the lead.
-2. Run **call-start retrieval** (embed query → cosine search scoped by `role` → `top_k = min(5, count)`).
-3. Pass `kb_context` into Vapi `assistantOverrides.variableValues` alongside `candidate_name`, `role`, `experience`.
+1. Logs the lead.
+2. Titan-embeds the query string → pgvector search by `role` → `top_k = min(5, count)`.
+3. Sends `kb_context` in Vapi `assistantOverrides.variableValues`.
 
-## Phase 4 — Vapi assistant prompt
+## Phase 5 — Vapi prompt
 
-Copy the contents of `docs/vapi-system-prompt.md` into your **Recruiter Assistant** system prompt in the Vapi dashboard. It references `{{kb_context}}`.
+Use `docs/vapi-system-prompt.md` in the **Recruiter Assistant** system prompt (`{{kb_context}}`).
 
-## Phase 6 — Environment variables
+## Environment variables
 
 ### Already on Render
 
-- `VAPI_API_KEY`
-- `VAPI_ASSISTANT_ID`
-- `VAPI_PHONE_NUMBER_ID`
+- `VAPI_API_KEY`, `VAPI_ASSISTANT_ID`, `VAPI_PHONE_NUMBER_ID`
 
-### Add for RAG
+### RAG + Bedrock
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `OPENAI_API_KEY` | Yes | OpenAI API key for **embeddings only** (same org as you use for `text-embedding-3-small`). |
-| `DATABASE_URL` | Yes | Supabase Postgres connection string (direct / port 5432 recommended). |
-| `RAG_ENABLED` | No | Default `true`. Set `false` to skip retrieval and send only the fallback `kb_context`. |
-| `EMBEDDING_MODEL` | No | Default `text-embedding-3-small`. |
+| `DATABASE_URL` | Yes | Supabase Postgres URI. |
+| `AWS_ACCESS_KEY_ID` | Yes | IAM user access key for Bedrock invoke. |
+| `AWS_SECRET_ACCESS_KEY` | Yes | IAM secret. |
+| `AWS_REGION` | Yes | Region where Titan v1 is enabled (e.g. `us-east-1`). |
+| `BEDROCK_EMBEDDING_MODEL_ID` | No | Default `amazon.titan-embed-text-v1`. |
+| `RAG_ENABLED` | No | Default `true`. Set `false` to skip retrieval. |
 
-### Optional later
+Optional: `AWS_SESSION_TOKEN` if using temporary credentials (boto3 reads it automatically when set).
 
-- `RAG_TOP_K` — not used in code today; top-k is fixed to **min(5, row count)** per your spec.
+### Removed (OpenAI path)
+
+- ~~`OPENAI_API_KEY`~~ — not used for RAG anymore.
+- ~~`EMBEDDING_MODEL`~~ — Titan model id is **`BEDROCK_EMBEDDING_MODEL_ID`** or the default above.
 
 ## Troubleshooting
 
 | Symptom | Check |
 |---------|--------|
-| `no_rows_for_role` in Render logs | Run `ingest_kb.py`; confirm rows in Supabase **Table Editor → kb_chunks**. |
-| `db_failed` SSL | Use Supabase direct host; ensure password is URL-encoded if it has special characters. |
-| Wrong questions for role | Form must send **exact** `DevOps Engineer` or `AI Engineer` (matches KB `role` and SQL filter). |
-| `embed_failed` | `OPENAI_API_KEY` billing / quota on OpenAI. |
+| `embed_failed` / AccessDenied | IAM policy includes `bedrock:InvokeModel`; model access enabled in console; **region** matches model. |
+| Wrong embedding length | Must stay **1536** for `amazon.titan-embed-text-v1` and current SQL. |
+| `no_rows_for_role` | Run `ingest_kb.py`; verify rows in Supabase **kb_chunks**. |
+| Mixed old vectors | After any embedding provider change, **re-run ingest** for all roles. |

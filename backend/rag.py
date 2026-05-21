@@ -1,5 +1,5 @@
 """
-Call-start RAG: embed query, retrieve kb_chunks from Supabase (pgvector), format kb_context for Vapi.
+Call-start RAG: Bedrock Titan embeddings → Supabase pgvector → kb_context for Vapi.
 """
 from __future__ import annotations
 
@@ -9,11 +9,12 @@ import time
 from typing import Any
 
 import psycopg2
-from openai import OpenAI
 from pgvector.psycopg2 import register_vector
 
+from embeddings import embed_titan_v1
+
 ALLOWED_ROLES = frozenset({"DevOps Engineer", "AI Engineer"})
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v1")
 MAX_TOP_K = 5
 RAG_ENABLED = os.getenv("RAG_ENABLED", "true").lower() in ("1", "true", "yes")
 
@@ -92,6 +93,8 @@ def retrieve_kb_context(
     Never raises — failures return a safe fallback string.
     """
     meta: dict[str, Any] = {
+        "embedding_provider": "bedrock",
+        "embedding_model": BEDROCK_MODEL_ID,
         "rag_enabled": RAG_ENABLED,
         "role": role,
         "latency_ms": None,
@@ -113,21 +116,19 @@ def retrieve_kb_context(
         return _fallback_context(f"Role '{role}' is not in the knowledge base"), meta
 
     db_url = os.getenv("DATABASE_URL")
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not db_url or not api_key:
+    ak = os.getenv("AWS_ACCESS_KEY_ID")
+    sk = os.getenv("AWS_SECRET_ACCESS_KEY")
+    if not db_url or not ak or not sk:
         meta["error"] = "missing_env"
         meta["latency_ms"] = round((time.perf_counter() - t0) * 1000, 2)
-        return _fallback_context("Missing DATABASE_URL or OPENAI_API_KEY"), meta
+        return _fallback_context(
+            "Missing DATABASE_URL or AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY"
+        ), meta
 
     query_text = _build_query(role, experience, name)
 
     try:
-        client = OpenAI(api_key=api_key)
-        emb_resp = client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=query_text,
-        )
-        query_vec = emb_resp.data[0].embedding
+        query_vec = embed_titan_v1(query_text)
     except Exception as e:
         meta["error"] = f"embed_failed:{e}"
         meta["latency_ms"] = round((time.perf_counter() - t0) * 1000, 2)

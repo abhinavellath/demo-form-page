@@ -11,8 +11,9 @@ import os
 import re
 from typing import Any
 
-# Cost-effective default for agent JSON tasks; override with BEDROCK_CHAT_MODEL_ID (same pattern as Titan in embeddings.py).
-DEFAULT_CHAT_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
+# Cost-effective Haiku on Bedrock; Claude 3 Haiku (20240307) is Legacy for many accounts—use Haiku 4.5 or set BEDROCK_CHAT_MODEL_ID.
+# Enable model access + submit Anthropic use case in AWS Bedrock console for your region.
+DEFAULT_CHAT_MODEL_ID = "anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
 def get_default_chat_model_id() -> str:

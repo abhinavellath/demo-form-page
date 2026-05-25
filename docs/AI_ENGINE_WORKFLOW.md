@@ -94,7 +94,7 @@ Integration tests, load tests, and hardening (queues, signatures) — as you pla
 | Variable | Purpose |
 |----------|---------|
 | `DATABASE_URL` | Already used; required for memory fetch + webhook DB updates |
-| `BEDROCK_CHAT_MODEL_ID` | Optional override; default in `agents/llm.py` is **Claude Haiku 4.5** (`anthropic.claude-haiku-4-5-20251001-v1:0`). Requires access in your region. |
+| `BEDROCK_CHAT_MODEL_ID` | Optional Converse `modelId` override. If unset, `agents/llm.py` picks **Haiku 4.5 inference profile** from `AWS_REGION` (e.g. `us-east-1` → `us.anthropic.claude-haiku-4-5-20251001-v1:0`). The raw foundation id `anthropic.claude-haiku-4-5-20251001-v1:0` often errors: on-demand throughput isn’t supported. |
 | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Same pattern as embeddings |
 | `VAPI_SERVER_SECRET` | Optional; if set, requests must send matching `x-vapi-secret` header |
 | `POST_CALL_DEBUG_KEY` | Enables `/internal/replay-post-call`; send as `x-debug-key` |

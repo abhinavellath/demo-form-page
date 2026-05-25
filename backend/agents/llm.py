@@ -11,13 +11,29 @@ import os
 import re
 from typing import Any
 
-# Cost-effective Haiku on Bedrock; Claude 3 Haiku (20240307) is Legacy for many accounts—use Haiku 4.5 or set BEDROCK_CHAT_MODEL_ID.
-# Enable model access + submit Anthropic use case in AWS Bedrock console for your region.
-DEFAULT_CHAT_MODEL_ID = "anthropic.claude-haiku-4-5-20251001-v1:0"
+# Haiku 4.5: many accounts cannot use the foundation model id with on-demand Converse — use a
+# geo inference profile (see AWS model card "Geo inference ID"). Override anytime with BEDROCK_CHAT_MODEL_ID.
+# Also enable model access + Anthropic use case in the Bedrock console.
+_HAIKU_45 = "claude-haiku-4-5-20251001-v1:0"
+
+
+def _default_haiku_45_inference_profile(region: str) -> str:
+    r = (region or "us-east-1").strip().lower()
+    if r.startswith("eu-"):
+        return f"eu.anthropic.{_HAIKU_45}"
+    if r.startswith("ap-northeast-"):
+        return f"jp.anthropic.{_HAIKU_45}"
+    if r in ("ap-southeast-2", "ap-southeast-4", "ap-southeast-6"):
+        return f"au.anthropic.{_HAIKU_45}"
+    # us-east-1, us-west-*, ca-*, etc. → US geo profile (per AWS Haiku 4.5 routing table)
+    return f"us.anthropic.{_HAIKU_45}"
 
 
 def get_default_chat_model_id() -> str:
-    return os.getenv("BEDROCK_CHAT_MODEL_ID", DEFAULT_CHAT_MODEL_ID).strip()
+    explicit = os.getenv("BEDROCK_CHAT_MODEL_ID", "").strip()
+    if explicit:
+        return explicit
+    return _default_haiku_45_inference_profile(os.getenv("AWS_REGION", "us-east-1"))
 
 
 def _bedrock_runtime():
@@ -41,7 +57,7 @@ def converse_json(*, system: str, user: str, model_id: str | None = None) -> dic
     """
     mid = (model_id or get_default_chat_model_id()).strip()
     if not mid:
-        raise RuntimeError("Chat model id is empty (check BEDROCK_CHAT_MODEL_ID / DEFAULT_CHAT_MODEL_ID)")
+        raise RuntimeError("Chat model id is empty (set BEDROCK_CHAT_MODEL_ID or AWS_REGION)")
 
     client = _bedrock_runtime()
     resp = client.converse(

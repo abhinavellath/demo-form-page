@@ -1,5 +1,3 @@
--- Run in Supabase SQL Editor after 001_kb_chunks.sql.
--- Stores one row per form submission for reporting / exports.
 
 create table if not exists public.leads (
   id uuid primary key default gen_random_uuid(),

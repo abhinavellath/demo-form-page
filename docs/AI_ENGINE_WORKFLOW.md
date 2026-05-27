@@ -20,7 +20,7 @@ This doc matches the implementation in `backend/` and `supabase/sql/003_ai_engin
 
 ## Phase 1 — AWS
 
-Use the **same** account/region as Titan embeddings. Grant **`bedrock:Converse`** (and model allowlist) for your chosen chat model. Env vars are listed at the end of your own checklist (you asked to add `.env` last).
+Use the **same** account/region as Titan embeddings. Grant **`bedrock:InvokeModel`** on your chat model or inference profile (Titan embeddings often use `bedrock:InvokeModel` already). Env vars are listed at the end of your own checklist (you asked to add `.env` last).
 
 ---
 
@@ -36,7 +36,7 @@ Use the **same** account/region as Titan embeddings. Grant **`bedrock:Converse`*
 
 ## Phase 3 — Deferred
 
-A larger shared “chat client” refactor can wait. Today, all Bedrock chat goes through `backend/agents/llm.py` (`converse_json`).
+A larger shared “chat client” refactor can wait. Today, all Bedrock chat goes through `backend/agents/llm.py` (`converse_json` → `invoke_model` + Anthropic Messages body).
 
 ---
 
@@ -44,7 +44,7 @@ A larger shared “chat client” refactor can wait. Today, all Bedrock chat goe
 
 | Module | Why | How |
 |--------|-----|-----|
-| `agents/sentiment_agent.py` | Reviewers want tone at a glance | One `converse_json` call; strict JSON shape in system prompt |
+| `agents/sentiment_agent.py` | Reviewers want tone at a glance | One `converse_json` / `invoke_model` call; strict JSON shape in system prompt |
 | `agents/qa_eval_agent.py` | Score answers vs rubric | Pass stored `kb_context` + transcript |
 | `agents/memory_agent.py` | Next call continuity | Summarize + merge with prior `conversation_memory` JSON |
 | `agents/lead_enrichment_agent.py` | CRM hints from the form only | One call on name/phone/role/experience (no transcript) |
@@ -94,10 +94,10 @@ Integration tests, load tests, and hardening (queues, signatures) — as you pla
 | Variable | Purpose |
 |----------|---------|
 | `DATABASE_URL` | Already used; required for memory fetch + webhook DB updates |
-| `BEDROCK_CHAT_MODEL_ID` | Optional Converse `modelId` override. If unset, `agents/llm.py` picks **Haiku 4.5 inference profile** from `AWS_REGION` (e.g. `us-east-1` → `us.anthropic.claude-haiku-4-5-20251001-v1:0`). The raw foundation id `anthropic.claude-haiku-4-5-20251001-v1:0` often errors: on-demand throughput isn’t supported. |
+| `BEDROCK_CHAT_MODEL_ID` | Optional `invoke_model` **modelId** override. If unset, `agents/llm.py` picks **Haiku 4.5 inference profile** from `AWS_REGION` (e.g. `us-east-1` → `us.anthropic.claude-haiku-4-5-20251001-v1:0`). The raw foundation id `anthropic.claude-haiku-4-5-20251001-v1:0` often errors: on-demand throughput isn’t supported. |
 | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Same pattern as embeddings |
 | `VAPI_SERVER_SECRET` | Optional; if set, requests must send matching `x-vapi-secret` header |
 | `POST_CALL_DEBUG_KEY` | Enables `/internal/replay-post-call`; send as `x-debug-key` |
 | `VAPI_ALLOW_REPROCESS` | If `true`, webhook may run pipeline again even when `ai_pipeline_status` is `done` |
 
-Optional tuning: `BEDROCK_CHAT_MAX_TOKENS`, `BEDROCK_CHAT_TEMPERATURE` (see `agents/llm.py`).
+Optional tuning: `BEDROCK_CHAT_MAX_TOKENS`, `BEDROCK_CHAT_TEMPERATURE`, `BEDROCK_ANTHROPIC_VERSION` (default `bedrock-2023-05-31`; see `agents/llm.py`).

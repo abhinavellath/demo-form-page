@@ -1,8 +1,10 @@
 """
-Minimal Bedrock Converse helper for JSON-only agent outputs.
+Bedrock chat for agent JSON outputs via invoke_model (Anthropic Messages API on Bedrock).
 
-Deferred “Phase 3” polish: this file is the single place that talks to
-`bedrock-runtime` for chat. Agents call `converse_json` only.
+Uses boto3 bedrock-runtime.invoke_model — same IAM model access as the console "enabled"
+Anthropic models; does not use the Converse API.
+
+Agents still call converse_json(); name is legacy.
 """
 from __future__ import annotations
 
@@ -11,9 +13,8 @@ import os
 import re
 from typing import Any
 
-# Haiku 4.5: many accounts cannot use the foundation model id with on-demand Converse — use a
-# geo inference profile (see AWS model card "Geo inference ID"). Override anytime with BEDROCK_CHAT_MODEL_ID.
-# Also enable model access + Anthropic use case in the Bedrock console.
+# Haiku 4.5: many accounts need the geo inference profile, not the bare foundation model id.
+# Override anytime with BEDROCK_CHAT_MODEL_ID.
 _HAIKU_45 = "claude-haiku-4-5-20251001-v1:0"
 
 
@@ -25,7 +26,6 @@ def _default_haiku_45_inference_profile(region: str) -> str:
         return f"jp.anthropic.{_HAIKU_45}"
     if r in ("ap-southeast-2", "ap-southeast-4", "ap-southeast-6"):
         return f"au.anthropic.{_HAIKU_45}"
-    # us-east-1, us-west-*, ca-*, etc. → US geo profile (per AWS Haiku 4.5 routing table)
     return f"us.anthropic.{_HAIKU_45}"
 
 
@@ -51,32 +51,54 @@ def _strip_json_fences(text: str) -> str:
     return t
 
 
+def _extract_text_from_anthropic_response(payload: dict[str, Any]) -> str:
+    """Bedrock invoke_model body for Anthropic Claude 3+ messages format."""
+    parts: list[str] = []
+    for block in payload.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text" and "text" in block:
+            parts.append(str(block["text"]))
+    return "\n".join(parts).strip()
+
+
 def converse_json(*, system: str, user: str, model_id: str | None = None) -> dict[str, Any]:
     """
-    One Converse round-trip; model must return a single JSON object as text.
+    One round-trip via invoke_model; model must return a single JSON object as text.
+
+    Request shape matches Anthropic on Bedrock (Messages API):
+    https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-anthropic-claude-messages.html
     """
     mid = (model_id or get_default_chat_model_id()).strip()
     if not mid:
         raise RuntimeError("Chat model id is empty (set BEDROCK_CHAT_MODEL_ID or AWS_REGION)")
 
+    anthropic_version = os.getenv("BEDROCK_ANTHROPIC_VERSION", "bedrock-2023-05-31").strip()
+    max_tokens = int(os.getenv("BEDROCK_CHAT_MAX_TOKENS", "4096"))
+    temperature = float(os.getenv("BEDROCK_CHAT_TEMPERATURE", "0.2"))
+
+    body: dict[str, Any] = {
+        "anthropic_version": anthropic_version,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+    }
+
     client = _bedrock_runtime()
-    resp = client.converse(
+    resp = client.invoke_model(
         modelId=mid,
-        system=[{"text": system}],
-        messages=[{"role": "user", "content": [{"text": user}]}],
-        inferenceConfig={
-            "maxTokens": int(os.getenv("BEDROCK_CHAT_MAX_TOKENS", "4096")),
-            "temperature": float(os.getenv("BEDROCK_CHAT_TEMPERATURE", "0.2")),
-        },
+        body=json.dumps(body),
+        contentType="application/json",
+        accept="application/json",
     )
 
-    out = resp.get("output", {}).get("message", {})
-    parts = out.get("content") or []
-    texts: list[str] = []
-    for p in parts:
-        if isinstance(p, dict) and "text" in p:
-            texts.append(str(p["text"]))
-    raw = "\n".join(texts).strip()
+    raw_bytes = resp.get("body")
+    if raw_bytes is None:
+        raise RuntimeError("Empty invoke_model response body")
+    payload: dict[str, Any] = json.loads(raw_bytes.read())
+
+    raw = _extract_text_from_anthropic_response(payload)
     if not raw:
         raise RuntimeError("Empty model text output")
 

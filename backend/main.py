@@ -20,10 +20,12 @@ import requests
 from agents.orchestrator import run_lead_enrichment_safe, run_post_call_pipeline
 from leads_db import (
     fetch_conversation_memory_for_phone,
-    find_lead_by_id,
-    find_lead_by_vapi_call_id,
+    fetch_prior_conversation_memory_for_phone,
+    find_post_call_context_by_chat_id,
+    find_post_call_context_by_lead_id,
+    find_post_call_context_by_vapi_call_id,
     persist_lead,
-    update_lead_post_call_results,
+    update_chat_post_call_results,
 )
 from rag import retrieve_kb_context
 
@@ -53,19 +55,16 @@ class Lead(BaseModel):
 
 
 class ReplayPostCallBody(BaseModel):
-    """Phase 0-B: replay agents without Vapi (manual transcript)."""
+    """Replay agents without Vapi (manual transcript)."""
 
     transcript: str
     lead_id: str | None = None
+    chat_id: str | None = None
     vapi_call_id: str | None = None
     force: bool = False
 
 
 def _assert_vapi_server_secret(x_vapi_secret: str | None) -> None:
-    """
-    When VAPI_SERVER_SECRET is set in the dashboard, validate inbound webhooks.
-    Vapi commonly forwards this as the `x-vapi-secret` header (confirm in your dashboard).
-    """
     if not VAPI_SERVER_SECRET:
         return
     got = (x_vapi_secret or "").strip()
@@ -74,10 +73,6 @@ def _assert_vapi_server_secret(x_vapi_secret: str | None) -> None:
 
 
 def _parse_end_of_call_report(body: dict[str, Any]) -> tuple[str | None, str, str | None]:
-    """
-    Vapi Server URL payload: top-level { "message": { "type": "end-of-call-report", ... } }.
-    Returns (vapi_call_id, transcript, summary).
-    """
     msg = body.get("message")
     if not isinstance(msg, dict):
         return None, "", None
@@ -99,20 +94,6 @@ def _parse_end_of_call_report(body: dict[str, Any]) -> tuple[str | None, str, st
     return call_id, transcript, summary
 
 
-def _normalize_prior_memory(raw: Any) -> dict[str, Any] | None:
-    if raw is None:
-        return None
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
-        try:
-            val = json.loads(raw)
-            return val if isinstance(val, dict) else None
-        except json.JSONDecodeError:
-            return None
-    return None
-
-
 def _final_pipeline_status(out: dict[str, Any]) -> str:
     s, q, m = out.get("sentiment"), out.get("qa_evaluation"), out.get("conversation_memory")
     if s is None and q is None and m is None:
@@ -122,25 +103,25 @@ def _final_pipeline_status(out: dict[str, Any]) -> str:
 
 def process_post_call(
     *,
-    lead: dict[str, Any],
+    ctx: dict[str, Any],
     transcript: str,
     vapi_summary: str | None,
     force: bool,
 ) -> dict[str, Any]:
     """
-    Runs Bedrock agents and persists to the lead row.
-    Idempotent: if ai_pipeline_status is already 'done', skip unless force or VAPI_ALLOW_REPROCESS.
+    Runs Bedrock agents and persists to chats + chat_ai_metadata for this chat_id.
     """
+    chat_id = str(ctx["chat_id"])
     if (
         not force
         and not VAPI_ALLOW_REPROCESS
-        and (lead.get("ai_pipeline_status") or "") == "done"
+        and (ctx.get("ai_pipeline_status") or "") == "done"
     ):
         return {"status": "skipped", "reason": "already_done"}
 
     if not transcript.strip():
-        update_lead_post_call_results(
-            lead_id=lead["id"],
+        update_chat_post_call_results(
+            chat_id=chat_id,
             transcript="",
             vapi_summary=vapi_summary,
             sentiment=None,
@@ -151,22 +132,25 @@ def process_post_call(
         )
         return {"status": "skipped", "reason": "empty_transcript"}
 
-    prior = _normalize_prior_memory(lead.get("conversation_memory"))
-    kb = lead.get("kb_context")
+    prior = fetch_prior_conversation_memory_for_phone(
+        str(ctx.get("phone") or ""), exclude_chat_id=chat_id
+    )
+
+    kb = ctx.get("kb_context")
     kb_str = kb if isinstance(kb, str) else None
 
     out = run_post_call_pipeline(
         transcript=transcript,
         kb_context=kb_str,
-        candidate_name=str(lead.get("name") or ""),
-        role=str(lead.get("role") or ""),
+        candidate_name=str(ctx.get("name") or ""),
+        role=str(ctx.get("role") or ""),
         prior_memory=prior,
     )
     st = _final_pipeline_status(out)
     err = "; ".join(out.get("errors") or []) if out.get("errors") else None
 
-    update_lead_post_call_results(
-        lead_id=lead["id"],
+    update_chat_post_call_results(
+        chat_id=chat_id,
         transcript=transcript,
         vapi_summary=vapi_summary,
         sentiment=out.get("sentiment"),
@@ -250,16 +234,6 @@ async def vapi_server_webhook(
     request: Request,
     x_vapi_secret: str | None = Header(default=None, alias="x-vapi-secret"),
 ):
-    """
-    Phase 6 (A): Vapi calls YOUR URL when something happens on a call.
-    We only act on `end-of-call-report` — that is when transcript + summary exist.
-
-    Why: your laptop is not on the call; Vapi's cloud is. When the call ends, Vapi
-    POSTs JSON to this route so your database can be updated without you polling.
-
-    How: match `call.id` to `leads.vapi_call_id` saved when /lead started the call,
-    then run the same post-call pipeline as the debug route.
-    """
     _assert_vapi_server_secret(x_vapi_secret)
     try:
         body = await request.json()
@@ -273,12 +247,12 @@ async def vapi_server_webhook(
     if call_id is None:
         return {"ok": True, "ignored": True}
 
-    lead = find_lead_by_vapi_call_id(call_id)
-    if not lead:
-        return {"ok": True, "ignored": True, "detail": "lead_not_found_for_call_id"}
+    ctx = find_post_call_context_by_vapi_call_id(call_id)
+    if not ctx:
+        return {"ok": True, "ignored": True, "detail": "chat_not_found_for_call_id"}
 
     result = process_post_call(
-        lead=lead,
+        ctx=ctx,
         transcript=transcript,
         vapi_summary=summary,
         force=False,
@@ -291,10 +265,6 @@ async def replay_post_call(
     body: ReplayPostCallBody,
     x_debug_key: str | None = Header(default=None, alias="x-debug-key"),
 ):
-    """
-    Phase 0-B: same agents as the webhook, but YOU send transcript (no Vapi needed).
-    Protect with POST_CALL_DEBUG_KEY in header `x-debug-key`.
-    """
     if not POST_CALL_DEBUG_KEY:
         raise HTTPException(
             status_code=503,
@@ -306,21 +276,24 @@ async def replay_post_call(
     if not body.transcript.strip():
         raise HTTPException(status_code=400, detail="transcript is required")
 
-    if body.lead_id:
-        lead = find_lead_by_id(body.lead_id)
+    ctx = None
+    if body.chat_id:
+        ctx = find_post_call_context_by_chat_id(body.chat_id)
+    elif body.lead_id:
+        ctx = find_post_call_context_by_lead_id(body.lead_id)
     elif body.vapi_call_id:
-        lead = find_lead_by_vapi_call_id(body.vapi_call_id)
+        ctx = find_post_call_context_by_vapi_call_id(body.vapi_call_id)
     else:
         raise HTTPException(
             status_code=400,
-            detail="provide lead_id or vapi_call_id so we can load kb_context + prior memory",
+            detail="provide chat_id, lead_id, or vapi_call_id",
         )
 
-    if not lead:
-        raise HTTPException(status_code=404, detail="lead not found")
+    if not ctx:
+        raise HTTPException(status_code=404, detail="chat/lead not found")
 
     result = process_post_call(
-        lead=lead,
+        ctx=ctx,
         transcript=body.transcript,
         vapi_summary=None,
         force=body.force,

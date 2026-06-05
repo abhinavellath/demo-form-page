@@ -18,6 +18,13 @@ from pydantic import BaseModel
 import requests
 
 from agents.orchestrator import run_lead_enrichment_safe, run_post_call_pipeline
+from agents.recruiter_chat import (
+    DEMO_CHAT_CONNECT_USER_MESSAGE,
+    format_transcript_for_post_call,
+    run_recruiter_opening,
+    run_recruiter_turn,
+)
+import chat_session_store
 from leads_db import (
     fetch_conversation_memory_for_phone,
     fetch_prior_conversation_memory_for_phone,
@@ -25,6 +32,7 @@ from leads_db import (
     find_post_call_context_by_lead_id,
     find_post_call_context_by_vapi_call_id,
     persist_lead,
+    persist_lead_chat_session,
     update_chat_post_call_results,
 )
 from rag import retrieve_kb_context
@@ -62,6 +70,10 @@ class ReplayPostCallBody(BaseModel):
     chat_id: str | None = None
     vapi_call_id: str | None = None
     force: bool = False
+
+
+class ChatMessageBody(BaseModel):
+    text: str
 
 
 def _assert_vapi_server_secret(x_vapi_secret: str | None) -> None:
@@ -227,6 +239,145 @@ async def receive_lead(data: Lead):
     )
 
     return {"message": f"AI recruiter is calling {data.name}"}
+
+
+@app.post("/lead-chat")
+async def start_lead_chat_session(data: Lead):
+    """
+    Text demo: persist lead + chat (no Vapi), return chat_id + session_secret + opening line.
+    """
+    kb_context, rag_meta = retrieve_kb_context(
+        role=data.role,
+        experience=data.experience,
+        name=data.name,
+    )
+    memory_for_phone = fetch_conversation_memory_for_phone(data.phone)
+    lead_ai_enrichment = run_lead_enrichment_safe(
+        name=data.name,
+        phone=data.phone,
+        role=data.role,
+        experience=data.experience,
+    )
+
+    persisted = persist_lead_chat_session(
+        name=data.name,
+        phone=data.phone,
+        role=data.role,
+        experience=data.experience,
+        rag_meta=rag_meta,
+        kb_context=kb_context,
+        lead_ai_enrichment=lead_ai_enrichment,
+    )
+    if not persisted:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not start chat session (DATABASE_URL missing or persist failed).",
+        )
+    lead_id, chat_id = persisted
+
+    session_secret = chat_session_store.create_session(chat_id)
+
+    opening = run_recruiter_opening(
+        candidate_name=data.name,
+        role=data.role,
+        experience=data.experience,
+        kb_context=kb_context,
+        prior_memory_json=memory_for_phone or None,
+    )
+    chat_session_store.set_opening_turns(
+        chat_id,
+        [
+            ("user", DEMO_CHAT_CONNECT_USER_MESSAGE),
+            ("assistant", opening),
+        ],
+    )
+
+    return {
+        "chat_id": chat_id,
+        "lead_id": lead_id,
+        "session_secret": session_secret,
+        "opening_message": opening,
+    }
+
+
+@app.post("/chat/{chat_id}/message")
+async def chat_demo_message(
+    chat_id: str,
+    body: ChatMessageBody,
+    x_chat_session: str | None = Header(default=None, alias="x-chat-session"),
+):
+    if not chat_session_store.validate_secret(chat_id, x_chat_session):
+        raise HTTPException(status_code=401, detail="invalid or missing x-chat-session")
+    sess = chat_session_store.get_session(chat_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="chat session not found or expired")
+    if sess.ended:
+        raise HTTPException(status_code=400, detail="conversation has ended")
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    ctx = find_post_call_context_by_chat_id(chat_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail="chat not found")
+
+    memory_json = fetch_conversation_memory_for_phone(str(ctx.get("phone") or ""))
+    try:
+        reply = run_recruiter_turn(
+            transcript_turns=sess.transcript_turns,
+            user_message=text,
+            candidate_name=str(ctx.get("name") or ""),
+            role=str(ctx.get("role") or ""),
+            experience=str(ctx.get("experience") or ""),
+            kb_context=ctx.get("kb_context") if isinstance(ctx.get("kb_context"), str) else None,
+            prior_memory_json=memory_json or None,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"recruiter model error: {exc}",
+        ) from exc
+
+    chat_session_store.append_user_and_assistant(chat_id, text, reply)
+    return {"reply": reply}
+
+
+@app.post("/chat/{chat_id}/end")
+async def chat_demo_end(
+    chat_id: str,
+    x_chat_session: str | None = Header(default=None, alias="x-chat-session"),
+):
+    if not chat_session_store.validate_secret(chat_id, x_chat_session):
+        raise HTTPException(status_code=401, detail="invalid or missing x-chat-session")
+    sess = chat_session_store.get_session(chat_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="chat session not found or expired")
+
+    if sess.post_call_ran:
+        return {"ok": True, "result": {"status": "already_finalized"}}
+
+    chat_session_store.set_ended(chat_id)
+    transcript = format_transcript_for_post_call(sess.transcript_turns)
+
+    ctx = find_post_call_context_by_chat_id(chat_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail="chat not found")
+
+    try:
+        result = process_post_call(
+            ctx=ctx,
+            transcript=transcript,
+            vapi_summary=None,
+            force=False,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"post-call pipeline error: {exc}",
+        ) from exc
+
+    chat_session_store.mark_post_call_ran(chat_id)
+    return {"ok": True, "result": result}
 
 
 @app.post("/webhooks/vapi")

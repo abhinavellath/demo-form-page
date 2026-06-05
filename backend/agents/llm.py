@@ -104,3 +104,54 @@ def converse_json(*, system: str, user: str, model_id: str | None = None) -> dic
 
     cleaned = _strip_json_fences(raw)
     return json.loads(cleaned)
+
+
+def converse_text(
+    *,
+    system: str,
+    messages: list[dict[str, Any]],
+    model_id: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """
+    Multi-turn Bedrock invoke; returns plain assistant text (not JSON).
+    `messages` items: {"role": "user"|"assistant", "content": str}.
+    """
+    mid = (model_id or get_default_chat_model_id()).strip()
+    if not mid:
+        raise RuntimeError("Chat model id is empty (set BEDROCK_CHAT_MODEL_ID or AWS_REGION)")
+
+    anthropic_version = os.getenv("BEDROCK_ANTHROPIC_VERSION", "bedrock-2023-05-31").strip()
+    mt = max_tokens if max_tokens is not None else int(os.getenv("BEDROCK_CHAT_MAX_TOKENS", "4096"))
+    temp = (
+        temperature
+        if temperature is not None
+        else float(os.getenv("BEDROCK_CHAT_TEMPERATURE", "0.2"))
+    )
+
+    body: dict[str, Any] = {
+        "anthropic_version": anthropic_version,
+        "max_tokens": mt,
+        "temperature": temp,
+        "system": system,
+        "messages": messages,
+    }
+
+    client = _bedrock_runtime()
+    resp = client.invoke_model(
+        modelId=mid,
+        body=json.dumps(body),
+        contentType="application/json",
+        accept="application/json",
+    )
+
+    raw_bytes = resp.get("body")
+    if raw_bytes is None:
+        raise RuntimeError("Empty invoke_model response body")
+    payload: dict[str, Any] = json.loads(raw_bytes.read())
+
+    raw = _extract_text_from_anthropic_response(payload)
+    if not raw:
+        raise RuntimeError("Empty model text output")
+    return raw.strip()

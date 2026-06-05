@@ -97,6 +97,80 @@ def persist_lead(
         print("LEAD_PERSIST_FAILED:", repr(e))
 
 
+def persist_lead_chat_session(
+    *,
+    name: str,
+    phone: str,
+    role: str,
+    experience: str,
+    rag_meta: dict[str, Any],
+    kb_context: str | None,
+    lead_ai_enrichment: dict[str, Any] | None,
+) -> tuple[str, str] | None:
+    """
+    Same rows as a Vapi lead (leads + chats + chat_ai_metadata) without placing a call.
+    chats.vapi_call_id is NULL; vapi_create_http_status 0; vapi_call_status 'chat_demo'.
+    Returns (lead_id, chat_id) as strings, or None if persistence failed / no DATABASE_URL.
+    """
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        print("CHAT_SESSION_PERSIST: skipped (no DATABASE_URL)")
+        return None
+
+    phone_n = _normalize_phone(phone)
+
+    try:
+        conn = psycopg2.connect(db_url, sslmode="require")
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO public.leads (name, phone, role, experience)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (name, phone_n, role, experience),
+                )
+                (lead_id,) = cur.fetchone()
+
+                cur.execute(
+                    """
+                    INSERT INTO public.chats (
+                        lead_id, vapi_call_id, vapi_create_http_status,
+                        vapi_call_status, kb_context
+                    )
+                    VALUES (%s, NULL, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (lead_id, 0, "chat_demo", kb_context),
+                )
+                (chat_id,) = cur.fetchone()
+
+                cur.execute(
+                    """
+                    INSERT INTO public.chat_ai_metadata (
+                        chat_id, rag_meta, lead_ai_enrichment
+                    )
+                    VALUES (%s, %s, %s)
+                    """,
+                    (
+                        chat_id,
+                        Json(rag_meta),
+                        Json(lead_ai_enrichment)
+                        if lead_ai_enrichment is not None
+                        else None,
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        print("CHAT_SESSION_PERSIST_FAILED:", repr(e))
+        return None
+
+    return (str(lead_id), str(chat_id))
+
+
 def fetch_conversation_memory_for_phone(phone: str) -> str:
     """
     Latest non-null conversation_memory from any prior chat for this phone

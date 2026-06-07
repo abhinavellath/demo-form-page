@@ -10,6 +10,26 @@ const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, '') ||
   'https://demo-form-page.onrender.com'
 
+function cancelAssistantSpeech() {
+  if (typeof window === 'undefined') return
+  window.speechSynthesis?.cancel()
+}
+
+/** Speaks the same string shown in the assistant bubble (demo only; not Vapi voice). */
+function speakAssistantText(text: string) {
+  if (typeof window === 'undefined') return
+  const trimmed = text.trim()
+  if (!trimmed) return
+  window.speechSynthesis?.cancel()
+  const u = new SpeechSynthesisUtterance(trimmed)
+  window.speechSynthesis?.speak(u)
+}
+
+function shouldSpeakAssistantLine(text: string) {
+  if (text.startsWith('Error:')) return false
+  return Boolean(text.trim())
+}
+
 export default function Home() {
   const [mode, setMode] = useState<DemoMode>('chat')
   const [loading, setLoading] = useState(false)
@@ -29,13 +49,34 @@ export default function Home() {
   const [chatBusy, setChatBusy] = useState(false)
   const [ended, setEnded] = useState(false)
   const [endResult, setEndResult] = useState<string | null>(null)
+  const [readAloud, setReadAloud] = useState(true)
   const bottomRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [lines, chatBusy])
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const synth = window.speechSynthesis
+    if (!synth) return
+    const loadVoices = () => {
+      synth.getVoices()
+    }
+    loadVoices()
+    synth.addEventListener('voiceschanged', loadVoices)
+    return () => {
+      synth.removeEventListener('voiceschanged', loadVoices)
+      synth.cancel()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!readAloud) cancelAssistantSpeech()
+  }, [readAloud])
+
   const resetChat = () => {
+    cancelAssistantSpeech()
     setChatId(null)
     setSessionSecret(null)
     setLines([])
@@ -77,8 +118,13 @@ export default function Home() {
         }
         setChatId(data.chat_id)
         setSessionSecret(data.session_secret)
-        setLines([{ role: 'assistant', text: data.opening_message }])
+        const opening =
+          typeof data.opening_message === 'string' ? data.opening_message : ''
+        setLines([{ role: 'assistant', text: opening }])
         setMessage('Chat session started — type below to talk to the recruiter.')
+        if (readAloud && shouldSpeakAssistantLine(opening)) {
+          speakAssistantText(opening)
+        }
         setForm({ name: '', phone: '', role: '', experience: '' })
       }
 
@@ -98,6 +144,7 @@ export default function Home() {
 
     setChatBusy(true)
     setInput('')
+    cancelAssistantSpeech()
     setLines((prev) => [...prev, { role: 'user', text }])
 
     try {
@@ -119,7 +166,11 @@ export default function Home() {
         ])
         return
       }
-      setLines((prev) => [...prev, { role: 'assistant', text: data.reply }])
+      const reply = typeof data.reply === 'string' ? data.reply : ''
+      setLines((prev) => [...prev, { role: 'assistant', text: reply }])
+      if (readAloud && shouldSpeakAssistantLine(reply)) {
+        speakAssistantText(reply)
+      }
     } catch {
       setLines((prev) => [
         ...prev,
@@ -135,6 +186,7 @@ export default function Home() {
 
   const endChat = async () => {
     if (!chatId || !sessionSecret || ended) return
+    cancelAssistantSpeech()
     setChatBusy(true)
     setEndResult('Running post-conversation agents…')
 
@@ -258,6 +310,24 @@ export default function Home() {
 
         {mode === 'chat' && chatId && (
           <div className="space-y-3 border-t pt-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-600">
+              <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  className="rounded border-gray-300"
+                  checked={readAloud}
+                  onChange={(e) => setReadAloud(e.target.checked)}
+                />
+                Read assistant aloud (browser voice)
+              </label>
+              <button
+                type="button"
+                onClick={() => cancelAssistantSpeech()}
+                className="px-2 py-1 rounded border border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
+              >
+                Stop audio
+              </button>
+            </div>
             <div className="h-64 overflow-y-auto border rounded-lg p-3 bg-gray-50 text-sm space-y-3">
               {lines.map((line, i) => (
                 <div

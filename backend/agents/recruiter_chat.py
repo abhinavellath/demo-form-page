@@ -9,13 +9,21 @@ from typing import Any
 
 from .llm import converse_text, get_default_chat_model_id
 
-# OOC user line used only to bootstrap the model; omitted from post-call transcript.
+# Synthetic first "user" turn for transcript + model context; omitted from post-call transcript.
 DEMO_CHAT_CONNECT_USER_MESSAGE = (
-    "(OOC: The candidate just joined this **text** screening session — same goals as a phone screen, but in writing. "
-    "Respond only with your opening recruiter message: introduce yourself naturally, confirm you are "
-    "speaking with the candidate, and briefly explain why you are reaching out. Do not ask a screening "
-    "question yet.)"
+    "(OOC: The candidate joined this text screening session. The assistant has already sent the fixed "
+    "intro (Sarah / TalentBridge, name check) shown as the first assistant message. Continue from the "
+    "candidate's replies; advance screening without repeating that full greeting unless they ask.)"
 )
+
+
+def fixed_vapi_opening_message(candidate_name: str) -> str:
+    """Matches the production Vapi assistant opening (plain text, no emojis)."""
+    name = (candidate_name or "").strip() or "you"
+    return (
+        "Hi, this is Sarah from TalentBridge Recruiting.\n\n"
+        f"Am I speaking with {name}?"
+    )
 
 
 def _build_system_prompt(
@@ -104,6 +112,8 @@ The following block was retrieved for this specific candidate role. Treat it as 
 - Respond naturally to interruptions
 - Be encouraging and professional
 - Do not invent a second unrelated questionnaire when the retrieved bank is present
+- **No emojis or emoticons** (no faces, hands, symbols used as decoration). Use plain text only.
+- The first assistant message in this thread is the **fixed** Sarah / TalentBridge intro and name check. **Do not** repeat that full greeting on later turns; after the candidate responds, move on to why you are screening and your questions (objectives 3–6 as appropriate).
 
 ## Closing
 
@@ -124,25 +134,9 @@ def run_recruiter_opening(
     kb_context: str | None,
     prior_memory_json: str | None,
 ) -> str:
-    if not get_default_chat_model_id():
-        return (
-            f"Hi {candidate_name}, This is Sarah from TalentBridge Recruiting. "
-            f"I'll ask a few questions about your background for the {role} role. "
-            "Whenever you're ready, reply with a short message and we'll get started."
-        )
-    system = _build_system_prompt(
-        candidate_name=candidate_name,
-        role=role,
-        experience=experience,
-        kb_context=kb_context,
-        prior_memory_json=prior_memory_json,
-    )
-    temp = float(os.getenv("RECRUITER_CHAT_TEMPERATURE", "0.35"))
-    return converse_text(
-        system=system,
-        messages=[{"role": "user", "content": DEMO_CHAT_CONNECT_USER_MESSAGE}],
-        temperature=temp,
-    )
+    """Opening matches the Vapi script; Bedrock is not used for this line (avoids drift / emojis)."""
+    _ = role, experience, kb_context, prior_memory_json  # same signature as callers / DB context
+    return fixed_vapi_opening_message(candidate_name)
 
 
 def run_recruiter_turn(
